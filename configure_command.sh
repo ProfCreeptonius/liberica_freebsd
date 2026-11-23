@@ -29,4 +29,4 @@ ac_cv_path_SED=/usr/local/bin/gsed bash configure \
     --with-toolchain-type=clang \
     --disable-warnings-as-errors \
     --with-extra-cflags="$my_cflags" \
-    --with-extra-cxxflags="$my_cflags" \
+    --with-extra-cxxflags="$my_cflags"
