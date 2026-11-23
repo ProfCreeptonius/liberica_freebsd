@@ -89,7 +89,7 @@ AC_DEFUN_ONCE([BASIC_SETUP_TOOLS],
   UTIL_REQUIRE_PROGS(RM, rm)
   UTIL_REQUIRE_PROGS(RMDIR, rmdir)
   UTIL_REQUIRE_PROGS(SH, sh)
-  UTIL_REQUIRE_PROGS(SORT, sort)
+  UTIL_REQUIRE_PROGS(SORT, gsort sort)
   UTIL_REQUIRE_PROGS(TAIL, tail)
   UTIL_REQUIRE_PROGS(TAR, gtar tar)
   UTIL_REQUIRE_PROGS(TEE, tee)
@@ -110,6 +110,11 @@ AC_DEFUN_ONCE([BASIC_SETUP_TOOLS],
   # For compare.sh only
   UTIL_LOOKUP_PROGS(CMP, cmp)
   UTIL_LOOKUP_PROGS(UNIQ, uniq)
+
+  if test "x$OPENJDK_BUILD_OS_ENV" = "xbsd.freebsd"; then
+    # Required by FreeBSD when W^X restrictions are enabled
+    UTIL_REQUIRE_PROGS(ELFCTL, elfctl)
+  fi
 
   # Always force rm.
   RM="$RM -f"

@@ -296,7 +296,7 @@ Java_sun_nio_ch_UnixFileDispatcherImpl_release0(JNIEnv *env, jobject this,
 static void closeFileDescriptor(JNIEnv *env, int fd) {
     if (fd != -1) {
         int result = close(fd);
-        if (result < 0)
+        if (result < 0 && errno != ECONNRESET)
             JNU_ThrowIOExceptionWithLastError(env, "Close failed");
     }
 }
@@ -403,11 +403,11 @@ JNIEXPORT jint JNICALL
 Java_sun_nio_ch_UnixFileDispatcherImpl_setDirect0(JNIEnv *env, jclass clazz,
                                               jobject fdo)
 {
-    jint fd = fdval(env, fdo);
     jint result;
-    struct statvfs file_stat;
 
 #if defined(O_DIRECT) || defined(F_NOCACHE) || defined(DIRECTIO_ON)
+    jint fd = fdval(env, fdo);
+    struct statvfs file_stat;
 #ifdef O_DIRECT
     jint orig_flag;
     orig_flag = fcntl(fd, F_GETFL);

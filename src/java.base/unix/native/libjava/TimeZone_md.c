@@ -46,6 +46,9 @@
 #define fileclose       fclose
 
 #if defined(__linux__) || defined(_ALLBSD_SOURCE)
+#ifdef __FreeBSD__
+static const char *ETC_TIMEZONE_FILE = "/var/db/zoneinfo";
+#endif
 static const char *ZONEINFO_DIR = "/usr/share/zoneinfo";
 static const char *DEFAULT_ZONEINFO_FILE = "/etc/localtime";
 #else
@@ -56,7 +59,7 @@ static const char *DEFAULT_ZONEINFO_FILE = "/usr/share/lib/zoneinfo/localtime";
 
 static const char popularZones[][4] = {"UTC", "GMT"};
 
-#if defined(__linux__) || defined(MACOSX)
+#if defined(__linux__) || defined(_ALLBSD_SOURCE) || defined(MACOSX)
 static char *isFileIdentical(char* buf, size_t size, char *pathname);
 
 /*
@@ -251,6 +254,30 @@ getPlatformTimeZoneID()
     char *buf;
     size_t size;
     int res;
+
+#ifdef __FreeBSD__
+    /*
+     * Try reading the /var/db/zoneinfo file for FreeBSD.
+     */
+    FILE *fp;
+    if ((fp = fopen(ETC_TIMEZONE_FILE, "r")) != NULL) {
+        char line[256];
+
+        if (fgets(line, sizeof(line), fp) != NULL) {
+            char *p = strchr(line, '\n');
+            if (p != NULL) {
+                *p = '\0';
+            }
+            if (strlen(line) > 0) {
+                tz = strdup(line);
+            }
+        }
+        (void) fclose(fp);
+        if (tz != NULL) {
+            return tz;
+        }
+    }
+#endif /* __FreeBSD__ */
 
     /*
      * Try /etc/localtime to find the zone ID.
@@ -549,7 +576,7 @@ getGMTOffsetID()
         return strdup("GMT");
     }
 
-#if defined(MACOSX)
+#if defined(_ALLBSD_SOURCE)
     time_t gmt_offset;
     gmt_offset = (time_t)localtm.tm_gmtoff;
     if (gmt_offset == 0) {

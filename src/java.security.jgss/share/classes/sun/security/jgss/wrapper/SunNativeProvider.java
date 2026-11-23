@@ -89,6 +89,11 @@ public final class SunNativeProvider extends Provider {
                         "libgssapi_krb5.so",
                         "libgssapi_krb5.so.2",
                 };
+                case BSD -> new String[] {
+                        "libgssapi.so",
+                        "libgssapi_krb5.so",
+                        "libgssapi_krb5.so.10",
+                };
                 case MACOS -> new String[]{
                         "libgssapi_krb5.dylib",
                         "/usr/lib/sasl2/libgssapiv2.2.so",

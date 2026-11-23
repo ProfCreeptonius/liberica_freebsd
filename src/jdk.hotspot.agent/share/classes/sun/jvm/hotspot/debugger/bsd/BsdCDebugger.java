@@ -32,16 +32,20 @@ import sun.jvm.hotspot.debugger.cdbg.*;
 import sun.jvm.hotspot.debugger.x86.*;
 import sun.jvm.hotspot.debugger.amd64.*;
 import sun.jvm.hotspot.debugger.aarch64.*;
+import sun.jvm.hotspot.debugger.ppc64.*;
 import sun.jvm.hotspot.debugger.bsd.x86.*;
 import sun.jvm.hotspot.debugger.bsd.amd64.*;
 import sun.jvm.hotspot.debugger.bsd.aarch64.*;
+import sun.jvm.hotspot.debugger.bsd.ppc64.*;
 import sun.jvm.hotspot.utilities.*;
 
 class BsdCDebugger implements CDebugger {
   private BsdDebugger dbg;
+  private boolean isDarwin;             // variant for MacOS
 
   BsdCDebugger(BsdDebugger dbg) {
     this.dbg = dbg;
+    this.isDarwin = PlatformInfo.getOS().equals("darwin");
   }
 
   public List<ThreadProxy> getThreadList() throws DebuggerException {
@@ -56,30 +60,46 @@ class BsdCDebugger implements CDebugger {
     if (pc == null) {
       return null;
     }
-    List<LoadObject> objs = getLoadObjectList();
-    Object[] arr = objs.toArray();
-    // load objects are sorted by base address, do binary search
-    int mid  = -1;
-    int low  = 0;
-    int high = arr.length - 1;
 
-    while (low <= high) {
-       mid = (low + high) >> 1;
-       LoadObject midVal = (LoadObject) arr[mid];
-       long cmp = pc.minus(midVal.getBase());
-       if (cmp < 0) {
-          high = mid - 1;
-       } else if (cmp > 0) {
-          long size = midVal.getSize();
-          if (cmp >= size) {
-             low = mid + 1;
-          } else {
-             return (LoadObject) arr[mid];
-          }
-       } else { // match found
-          return (LoadObject) arr[mid];
-       }
+    List<LoadObject> objs = getLoadObjectList();
+    if (isDarwin) {
+      Object[] arr = objs.toArray();
+      // load objects are sorted by base address, do binary search
+      int mid  = -1;
+      int low  = 0;
+      int high = arr.length - 1;
+
+      while (low <= high) {
+         mid = (low + high) >> 1;
+         LoadObject midVal = (LoadObject) arr[mid];
+         long cmp = pc.minus(midVal.getBase());
+         if (cmp < 0) {
+            high = mid - 1;
+         } else if (cmp > 0) {
+            long size = midVal.getSize();
+            if (cmp >= size) {
+               low = mid + 1;
+            } else {
+               return (LoadObject) arr[mid];
+            }
+         } else { // match found
+            return (LoadObject) arr[mid];
+         }
+      }
+    } else {
+      /* Typically we have about ten loaded objects here. So no reason to do
+        sort/binary search here. Linear search gives us acceptable performance.
+        This also works more reliably on BSD.*/
+      for (int i = 0; i < objs.size(); i++) {
+        LoadObject ob = objs.get(i);
+        Address base = ob.getBase();
+        long size = ob.getSize();
+        if (pc.greaterThanOrEqual(base) && pc.lessThan(base.addOffsetTo(size))) {
+          return ob;
+        }
+      }
     }
+
     // no match found.
     return null;
   }
@@ -100,6 +120,13 @@ class BsdCDebugger implements CDebugger {
        Address pc  = context.getRegisterAsAddress(AMD64ThreadContext.RIP);
        if (pc == null) return null;
        return new BsdAMD64CFrame(dbg, rbp, pc);
+    }  else if (cpu.equals("ppc64")) {
+        PPC64ThreadContext context = (PPC64ThreadContext) thread.getContext();
+        Address sp = context.getRegisterAsAddress(PPC64ThreadContext.SP);
+        if (sp == null) return null;
+        Address pc  = context.getRegisterAsAddress(PPC64ThreadContext.PC);
+        if (pc == null) return null;
+        return new BsdPPC64CFrame(dbg, sp, pc, BsdDebuggerLocal.getAddressSize());
     } else if (cpu.equals("aarch64")) {
        AARCH64ThreadContext context = (AARCH64ThreadContext) thread.getContext();
        Address fp = context.getRegisterAsAddress(AARCH64ThreadContext.FP);
@@ -122,10 +149,10 @@ class BsdCDebugger implements CDebugger {
   }
 
   public boolean canDemangle() {
-    return false;
+    return true;
   }
 
   public String demangle(String sym) {
-    throw new UnsupportedOperationException();
+    return dbg.demangle(sym);
   }
 }

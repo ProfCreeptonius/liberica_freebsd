@@ -88,7 +88,10 @@ public class SigTestDriver {
         String failureMessage = null;
         boolean passed = true;
 
-        for (String mode : new String[] {"sigset", "sigaction"}) {
+        String[] functions = Platform.getOsName().equals("OpenBSD") ? new String[] {"sigaction"} :
+                new String[] {"sigset", "sigaction"};
+
+        for (String mode : functions) {
             // Scenarios postpre and postpost requires libjsig.
             // The other scenarios are run with libjsig to validate the deprecation warning.
             for (String scenario : new String[] {"nojvm", "prepre", "prepost", "postpre#libjsig", "postpost#libjsig",

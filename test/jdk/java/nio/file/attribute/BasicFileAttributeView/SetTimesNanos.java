@@ -57,7 +57,7 @@ public class SetTimesNanos {
             dir, store.name(), store.type());
 
         Set<String> testedTypes = Platform.isWindows() ?
-            Set.of("NTFS") : Set.of("apfs", "ext4", "xfs", "zfs");
+            Set.of("NTFS") : Set.of("apfs", "ext4", "ufs", "xfs", "zfs");
         if (!testedTypes.contains(store.type())) {
             throw new SkippedException(store.type() + " not in " + testedTypes);
         }

@@ -54,7 +54,6 @@
 // put OS-includes here
 # include <sys/types.h>
 # include <sys/mman.h>
-# include <pthread.h>
 # include <signal.h>
 # include <errno.h>
 # include <dlfcn.h>
@@ -63,6 +62,7 @@
 # include <unistd.h>
 # include <sys/resource.h>
 # include <sys/stat.h>
+# include <sys/sysctl.h>
 # include <sys/time.h>
 # include <sys/utsname.h>
 # include <sys/socket.h>
@@ -72,18 +72,19 @@
 #ifndef __OpenBSD__
 # include <ucontext.h>
 #endif
+#ifdef __FreeBSD__
+# include <machine/fpu.h>
+# include <sys/procctl.h>
+#ifndef PROC_STACKGAP_STATUS
+#define PROC_STACKGAP_STATUS	18
+#endif
+#ifndef PROC_STACKGAP_DISABLE
+#define PROC_STACKGAP_DISABLE	0x0002
+#endif
+#endif /* __FreeBSD__ */
 
 #if !defined(__APPLE__) && !defined(__NetBSD__)
 # include <pthread_np.h>
-#endif
-
-// needed by current_stack_base_and_size() workaround for Mavericks
-#if defined(__APPLE__)
-# include <errno.h>
-# include <sys/types.h>
-# include <sys/sysctl.h>
-# define DEFAULT_MAIN_THREAD_STACK_PAGES 2048
-# define OS_X_10_9_0_KERNEL_MAJOR_VERSION 13
 #endif
 
 #ifdef AMD64
@@ -275,16 +276,17 @@
 # endif
 #endif
 
+#ifdef AMD64
 address os::current_stack_pointer() {
-#if defined(__clang__) || defined(__llvm__)
-  void *esp;
-  __asm__("mov %%" SPELL_REG_SP ", %0":"=r"(esp));
-  return (address) esp;
-#else
-  register void *esp __asm__ (SPELL_REG_SP);
-  return (address) esp;
-#endif
+  return (address)__builtin_frame_address(0);
 }
+#else
+address os::current_stack_pointer() __attribute__ ((optnone)) {
+  intptr_t* esp;
+  __asm__ __volatile__ ("mov %%" SPELL_REG_SP ", %0":"=r"(esp):);
+  return (address) esp;
+}
+#endif
 
 char* os::non_memory_address_word() {
   // Must never look like an address returned by reserve_memory,
@@ -366,7 +368,7 @@ frame os::get_sender_for_C_frame(frame* fr) {
 static intptr_t* _get_previous_fp() {
 #if defined(__clang__) || defined(__llvm__)
   intptr_t **ebp;
-  __asm__("mov %%" SPELL_REG_FP ", %0":"=r"(ebp));
+  __asm__ __volatile__ ("mov %%" SPELL_REG_FP ", %0":"=r"(ebp):);
 #else
   register intptr_t **ebp __asm__ (SPELL_REG_FP);
 #endif
@@ -414,6 +416,55 @@ bool PosixSignals::pd_hotspot_signal_handler(int sig, siginfo_t* info,
     // Handle ALL stack overflow variations here
     if (sig == SIGSEGV || sig == SIGBUS) {
       address addr = (address) info->si_addr;
+#ifdef __FreeBSD__
+      /*
+       * Determine whether the kernel stack guard pages have been disabled
+       */
+      int status = 0;
+      int ret = procctl(P_PID, getpid(), PROC_STACKGAP_STATUS, &status);
+
+      /*
+       * Check if the call to procctl(2) failed or the stack guard is not
+       * disabled.  Either way, we'll then attempt a workaround.
+       */
+      if (ret == -1 || !(status & PROC_STACKGAP_DISABLE)) {
+          /*
+           * Try to work around the problems caused on FreeBSD where the kernel
+           * may place guard pages above JVM guard pages and prevent the Java
+           * thread stacks growing into the JVM guard pages.  The work around
+           * is to determine how many such pages there may be and round down the
+           * fault address so that tests of whether it is in the JVM guard zone
+           * succeed.
+           *
+           * Note that this is a partial workaround at best since the normally
+           * the JVM could then unprotect the reserved area to allow a critical
+           * section to complete.  This is not possible if the kernel has
+           * placed guard pages below the reserved area.
+           *
+           * This also suffers from the problem that the
+           * security.bsd.stack_guard_page sysctl is dynamic and may have
+           * changed since the stack was allocated.  This is likely to be rare
+           * in practice though.
+           *
+           * What this does do is prevent the JVM crashing on FreeBSD and
+           * instead throwing a StackOverflowError when infinite recursion
+           * is attempted, which is the expected behaviour.  Due to it's
+           * limitations though, objects may be in unexpected states when
+           * this occurs.
+           *
+           * A better way to avoid these problems is either to be on a new
+           * enough version of FreeBSD (one that has PROC_STACKGAP_CTL) or set
+           * security.bsd.stack_guard_page to zero.
+           */
+          int guard_pages = 0;
+          size_t size = sizeof(guard_pages);
+          if (sysctlbyname("security.bsd.stack_guard_page",
+                           &guard_pages, &size, nullptr, 0) == 0 &&
+              guard_pages > 0) {
+            addr -= guard_pages * os::vm_page_size();
+          }
+      }
+#endif
 
       // check if fault address is within thread stack
       if (thread->is_in_full_stack(addr)) {
@@ -654,6 +705,7 @@ void os::Bsd::init_thread_fpu_state(void) {
 
 juint os::cpu_microcode_revision() {
   juint result = 0;
+#ifdef __APPLE__
   char data[8];
   size_t sz = sizeof(data);
   int ret = sysctlbyname("machdep.cpu.microcode_version", data, &sz, nullptr, 0);
@@ -661,6 +713,11 @@ juint os::cpu_microcode_revision() {
     if (sz == 4) result = *((juint*)data);
     if (sz == 8) result = *((juint*)data + 1); // upper 32-bits
   }
+#else
+  // FIXME: Add an implementation for *BSD
+  //        FreeBSD can potentially do this per the cpuupdate of
+  //        devcpu-data ports.
+#endif
   return result;
 }
 
@@ -672,7 +729,7 @@ juint os::cpu_microcode_revision() {
 size_t os::_compiler_thread_min_stack_allowed = 48 * K;
 size_t os::_java_thread_min_stack_allowed = 48 * K;
 #ifdef _LP64
-size_t os::_vm_internal_thread_min_stack_allowed = 64 * K;
+size_t os::_vm_internal_thread_min_stack_allowed = 128 * K;
 #else
 size_t os::_vm_internal_thread_min_stack_allowed = (48 DEBUG_ONLY(+ 4)) * K;
 #endif // _LP64
@@ -695,104 +752,6 @@ size_t os::Posix::default_stack_size(os::ThreadType thr_type) {
 }
 
 
-// Java thread:
-//
-//   Low memory addresses
-//    +------------------------+
-//    |                        |\  Java thread created by VM does not have glibc
-//    |    glibc guard page    | - guard, attached Java thread usually has
-//    |                        |/  1 glibc guard page.
-// P1 +------------------------+ Thread::stack_base() - Thread::stack_size()
-//    |                        |\
-//    |  HotSpot Guard Pages   | - red, yellow and reserved pages
-//    |                        |/
-//    +------------------------+ StackOverflow::stack_reserved_zone_base()
-//    |                        |\
-//    |      Normal Stack      | -
-//    |                        |/
-// P2 +------------------------+ Thread::stack_base()
-//
-// Non-Java thread:
-//
-//   Low memory addresses
-//    +------------------------+
-//    |                        |\
-//    |  glibc guard page      | - usually 1 page
-//    |                        |/
-// P1 +------------------------+ Thread::stack_base() - Thread::stack_size()
-//    |                        |\
-//    |      Normal Stack      | -
-//    |                        |/
-// P2 +------------------------+ Thread::stack_base()
-//
-// ** P1 (aka bottom) and size are the address and stack size
-//    returned from pthread_attr_getstack().
-// ** P2 (aka stack top or base) = P1 + size
-
-void os::current_stack_base_and_size(address* base, size_t* size) {
-  address bottom;
-#ifdef __APPLE__
-  pthread_t self = pthread_self();
-  *base = (address) pthread_get_stackaddr_np(self);
-  *size = pthread_get_stacksize_np(self);
-  // workaround for OS X 10.9.0 (Mavericks)
-  // pthread_get_stacksize_np returns 128 pages even though the actual size is 2048 pages
-  if (pthread_main_np() == 1) {
-    // At least on Mac OS 10.12 we have observed stack sizes not aligned
-    // to pages boundaries. This can be provoked by e.g. setrlimit() (ulimit -s xxxx in the
-    // shell). Apparently Mac OS actually rounds upwards to next multiple of page size,
-    // however, we round downwards here to be on the safe side.
-    *size = align_down(*size, getpagesize());
-
-    if ((*size) < (DEFAULT_MAIN_THREAD_STACK_PAGES * (size_t)getpagesize())) {
-      char kern_osrelease[256];
-      size_t kern_osrelease_size = sizeof(kern_osrelease);
-      int ret = sysctlbyname("kern.osrelease", kern_osrelease, &kern_osrelease_size, nullptr, 0);
-      if (ret == 0) {
-        // get the major number, atoi will ignore the minor amd micro portions of the version string
-        if (atoi(kern_osrelease) >= OS_X_10_9_0_KERNEL_MAJOR_VERSION) {
-          *size = (DEFAULT_MAIN_THREAD_STACK_PAGES*getpagesize());
-        }
-      }
-    }
-  }
-  bottom = *base - *size;
-#elif defined(__OpenBSD__)
-  stack_t ss;
-  int rslt = pthread_stackseg_np(pthread_self(), &ss);
-
-  if (rslt != 0)
-    fatal("pthread_stackseg_np failed with error = %d", rslt);
-
-  *base = (address) ss.ss_sp;
-  *size = ss.ss_size;
-  bottom = *base - *size;
-#else
-  pthread_attr_t attr;
-
-  int rslt = pthread_attr_init(&attr);
-
-  // JVM needs to know exact stack location, abort if it fails
-  if (rslt != 0)
-    fatal("pthread_attr_init failed with error = %d", rslt);
-
-  rslt = pthread_attr_get_np(pthread_self(), &attr);
-
-  if (rslt != 0)
-    fatal("pthread_attr_get_np failed with error = %d", rslt);
-
-  if (pthread_attr_getstackaddr(&attr, (void **)&bottom) != 0 ||
-      pthread_attr_getstacksize(&attr, size) != 0) {
-    fatal("Can not locate current stack attributes!");
-  }
-
-  *base = bottom + *size;
-
-  pthread_attr_destroy(&attr);
-#endif
-  assert(os::current_stack_pointer() >= bottom &&
-         os::current_stack_pointer() < *base, "just checking");
-}
 
 /////////////////////////////////////////////////////////////////////////////
 // helper functions for fatal error handler
@@ -829,6 +788,17 @@ void os::print_context(outputStream *st, const void *context) {
   st->print(", ERR=" INTPTR_FORMAT, (intptr_t)uc->context_err);
   st->cr();
   st->print("  TRAPNO=" INTPTR_FORMAT, (intptr_t)uc->context_trapno);
+#  ifdef __FreeBSD__
+  // Add XMM registers + MXCSR. Note that C2 uses XMM to spill GPR values including pointers.
+  st->cr();
+  st->cr();
+  struct savefpu *savefpu = (struct savefpu *)uc->uc_mcontext.mc_fpstate;
+  for (int i = 0; i < 16; ++i) {
+    const int64_t* xmm_val_addr = (int64_t*)&(savefpu->sv_xmm[i]);
+    st->print_cr("XMM[%d]=" INTPTR_FORMAT " " INTPTR_FORMAT, i, xmm_val_addr[1], xmm_val_addr[0]);
+  }
+  st->print("  MXCSR=" UINT32_FORMAT_X_0, savefpu->sv_env.en_mxcsr);
+#  endif
 #else
   st->print(  "EAX=" INTPTR_FORMAT, (intptr_t)uc->context_eax);
   st->print(", EBX=" INTPTR_FORMAT, (intptr_t)uc->context_ebx);
@@ -896,7 +866,7 @@ void os::print_register_info(outputStream *st, const void *context, int& continu
 
 void os::setup_fpu() {
 #ifndef AMD64
-  address fpu_cntrl = StubRoutines::addr_fpu_cntrl_wrd_std();
+  address fpu_cntrl = StubRoutines::x86::addr_fpu_cntrl_wrd_std();
   __asm__ volatile (  "fldcw (%0)" :
                       : "r" (fpu_cntrl) : "memory");
 #endif // !AMD64
@@ -904,6 +874,7 @@ void os::setup_fpu() {
 
 #ifndef PRODUCT
 void os::verify_stack_alignment() {
+  assert(((intptr_t)os::current_stack_pointer() & (StackAlignmentInBytes-1)) == 0, "incorrect stack alignment");
 }
 #endif
 

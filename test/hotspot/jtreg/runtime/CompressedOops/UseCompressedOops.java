@@ -93,7 +93,7 @@ public class UseCompressedOops {
             //
             // OSX doesn't seem to care about HeapBaseMinAddress.  Windows memory
             // locations are affected by ASLR.
-            if (!Platform.isOSX() && !Platform.isWindows()) {
+            if (!Platform.isOSX() && !Platform.isBSD() && !Platform.isWindows()) {
 
                 // Larger than 4gb heap should result in zero based with shift 3
                 testCompressedOops(args, "-XX:+UseCompressedOops", "-Xmx5g")

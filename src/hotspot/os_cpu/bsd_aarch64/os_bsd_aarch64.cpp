@@ -75,6 +75,16 @@
 #ifndef __OpenBSD__
 # include <ucontext.h>
 #endif
+#ifdef __FreeBSD__
+# include <sys/sysctl.h>
+# include <sys/procctl.h>
+# ifndef PROC_STACKGAP_STATUS
+#  define PROC_STACKGAP_STATUS	18
+# endif
+# ifndef PROC_STACKGAP_DISABLE
+#  define PROC_STACKGAP_DISABLE	0x0002
+# endif
+#endif /* __FreeBSD__ */
 
 #if !defined(__APPLE__) && !defined(__NetBSD__)
 # include <pthread_np.h>
@@ -88,7 +98,6 @@
 
 // 10.5 UNIX03 member name prefixes
 #define DU3_PREFIX(s, m) __ ## s.__ ## m
-#endif
 
 #define context_x    uc_mcontext->DU3_PREFIX(ss,x)
 #define context_fp   uc_mcontext->DU3_PREFIX(ss,fp)
@@ -97,6 +106,31 @@
 #define context_pc   uc_mcontext->DU3_PREFIX(ss,pc)
 #define context_cpsr uc_mcontext->DU3_PREFIX(ss,cpsr)
 #define context_esr  uc_mcontext->DU3_PREFIX(es,esr)
+#endif
+
+#ifdef __FreeBSD__
+# define context_x  uc_mcontext.mc_gpregs.gp_x
+# define context_fp uc_mcontext.mc_gpregs.gp_x[29]
+# define context_lr uc_mcontext.mc_gpregs.gp_lr
+# define context_sp uc_mcontext.mc_gpregs.gp_sp
+# define context_pc uc_mcontext.mc_gpregs.gp_elr
+#endif
+
+#ifdef __NetBSD__
+# define context_x  uc_mcontext.__gregs
+# define context_fp uc_mcontext.__gregs[_REG_FP]
+# define context_lr uc_mcontext.__gregs[_REG_LR]
+# define context_sp uc_mcontext.__gregs[_REG_SP]
+# define context_pc uc_mcontext.__gregs[_REG_ELR]
+#endif
+
+#ifdef __OpenBSD__
+# define context_x  sc_x
+# define context_fp sc_x[29]
+# define context_lr sc_lr
+# define context_sp sc_sp
+# define context_pc sc_elr
+#endif
 
 #define REG_BCP context_x[22]
 
@@ -190,7 +224,16 @@ intptr_t* os::fetch_bcp_from_context(const void* ucVoid) {
 
 // JVM compiled with -fno-omit-frame-pointer, so RFP is saved on the stack.
 frame os::get_sender_for_C_frame(frame* fr) {
+#if !defined(__APPLE__)
+  address pc = fr->sender_pc();
+  CodeBlob* cb = CodeCache::find_blob(pc);
+  bool use_codeblob = cb != nullptr && cb->frame_size() > 0;
+  assert(!use_codeblob || !Interpreter::contains(pc), "should not be an interpreter frame");
+  intptr_t* sender_sp = use_codeblob ? (fr->link() + frame::metadata_words - cb->frame_size()) : fr->link();
+  return frame(sender_sp, sender_sp, fr->link(), pc, cb, true /* allow_cb_null */);
+#else
   return frame(fr->sender_sp(), fr->link(), fr->sender_pc());
+#endif
 }
 
 NOINLINE frame os::current_frame() {
@@ -222,7 +265,7 @@ bool PosixSignals::pd_hotspot_signal_handler(int sig, siginfo_t* info,
     pc = (address) os::Posix::ucontext_get_pc(uc);
 
     // Handle ALL stack overflow variations here
-    if (sig == SIGSEGV || sig == SIGBUS) {
+    if (sig == SIGSEGV MACOS_AARCH64_ONLY(|| sig == SIGBUS)) {
       address addr = (address) info->si_addr;
 
       // Make sure the high order byte is sign extended, as it may be masked away by the hardware.
@@ -230,6 +273,55 @@ bool PosixSignals::pd_hotspot_signal_handler(int sig, siginfo_t* info,
         addr = address(uintptr_t(addr) | (uintptr_t(0xFF) << 56));
       }
 
+#ifdef __FreeBSD__
+      /*
+       * Determine whether the kernel stack guard pages have been disabled
+       */
+      int status = 0;
+      int ret = procctl(P_PID, getpid(), PROC_STACKGAP_STATUS, &status);
+
+      /*
+       * Check if the call to procctl(2) failed or the stack guard is not
+       * disabled.  Either way, we'll then attempt a workaround.
+       */
+      if (ret == -1 || !(status & PROC_STACKGAP_DISABLE)) {
+          /*
+           * Try to work around the problems caused on FreeBSD where the kernel
+           * may place guard pages above JVM guard pages and prevent the Java
+           * thread stacks growing into the JVM guard pages.  The work around
+           * is to determine how many such pages there may be and round down the
+           * fault address so that tests of whether it is in the JVM guard zone
+           * succeed.
+           *
+           * Note that this is a partial workaround at best since the normally
+           * the JVM could then unprotect the reserved area to allow a critical
+           * section to complete.  This is not possible if the kernel has
+           * placed guard pages below the reserved area.
+           *
+           * This also suffers from the problem that the
+           * security.bsd.stack_guard_page sysctl is dynamic and may have
+           * changed since the stack was allocated.  This is likely to be rare
+           * in practice though.
+           *
+           * What this does do is prevent the JVM crashing on FreeBSD and
+           * instead throwing a StackOverflowError when infinite recursion
+           * is attempted, which is the expected behaviour.  Due to it's
+           * limitations though, objects may be in unexpected states when
+           * this occurs.
+           *
+           * A better way to avoid these problems is either to be on a new
+           * enough version of FreeBSD (one that has PROC_STACKGAP_CTL) or set
+           * security.bsd.stack_guard_page to zero.
+           */
+          int guard_pages = 0;
+          size_t size = sizeof(guard_pages);
+          if (sysctlbyname("security.bsd.stack_guard_page",
+                           &guard_pages, &size, nullptr, 0) == 0 &&
+              guard_pages > 0) {
+            addr -= guard_pages * os::vm_page_size();
+          }
+      }
+#endif
       // check if fault address is within thread stack
       if (thread->is_in_full_stack(addr)) {
         // stack overflow
@@ -281,7 +373,7 @@ bool PosixSignals::pd_hotspot_signal_handler(int sig, siginfo_t* info,
         }
       } else if (sig == SIGILL && nativeInstruction_at(pc)->is_stop()) {
         // A pointer to the message will have been placed in r0
-        const char *detail_msg = (const char *)(uc->uc_mcontext->DU3_PREFIX(ss,x[0]));
+        const char *detail_msg = (const char *)uc->context_x[0];
         const char *msg = "stop";
         if (TraceTraps) {
           tty->print_cr("trap: %s: (SIGILL)", msg);
@@ -355,49 +447,6 @@ size_t os::Posix::default_stack_size(os::ThreadType thr_type) {
   size_t s = (thr_type == os::compiler_thread ? 4 * M : 1 * M);
   return s;
 }
-void os::current_stack_base_and_size(address* base, size_t* size) {
-  address bottom;
-#ifdef __APPLE__
-  pthread_t self = pthread_self();
-  *base = (address) pthread_get_stackaddr_np(self);
-  *size = pthread_get_stacksize_np(self);
-  bottom = *base - *size;
-#elif defined(__OpenBSD__)
-  stack_t ss;
-  int rslt = pthread_stackseg_np(pthread_self(), &ss);
-
-  if (rslt != 0)
-    fatal("pthread_stackseg_np failed with error = %d", rslt);
-
-  *base = (address) ss.ss_sp;
-  *size = ss.ss_size;
-  bottom = *base - *size;
-#else
-  pthread_attr_t attr;
-
-  int rslt = pthread_attr_init(&attr);
-
-  // JVM needs to know exact stack location, abort if it fails
-  if (rslt != 0)
-    fatal("pthread_attr_init failed with error = %d", rslt);
-
-  rslt = pthread_attr_get_np(pthread_self(), &attr);
-
-  if (rslt != 0)
-    fatal("pthread_attr_get_np failed with error = %d", rslt);
-
-  if (pthread_attr_getstackaddr(&attr, (void **)&bottom) != 0 ||
-      pthread_attr_getstacksize(&attr, size) != 0) {
-    fatal("Can not locate current stack attributes!");
-  }
-
-  *base = bottom + *size;
-
-  pthread_attr_destroy(&attr);
-#endif
-  assert(os::current_stack_pointer() >= bottom &&
-         os::current_stack_pointer() < *base, "just checking");
-}
 
 /////////////////////////////////////////////////////////////////////////////
 // helper functions for fatal error handler
@@ -449,7 +498,9 @@ void os::print_context(outputStream *st, const void *context) {
   st->print("  sp=" INTPTR_FORMAT, (intptr_t)uc->context_sp);
   st->cr();
   st->print(  "pc=" INTPTR_FORMAT,  (intptr_t)uc->context_pc);
+#ifdef __APPLE__
   st->print(" cpsr=" INTPTR_FORMAT, (intptr_t)uc->context_cpsr);
+#endif
   st->cr();
 }
 
@@ -497,9 +548,11 @@ int os::extra_bang_size_in_bytes() {
   return 0;
 }
 
+#ifdef __APPLE__
 void os::current_thread_enable_wx(WXMode mode) {
   pthread_jit_write_protect_np(mode == WXExec);
 }
+#endif
 
 static inline void atomic_copy64(const volatile void *src, volatile void *dst) {
   *(jlong *) dst = *(const jlong *) src;

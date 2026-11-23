@@ -106,7 +106,7 @@ static int ParseLocale(JNIEnv* env, int cat, char ** std_language, char ** std_s
     lc = setlocale(cat, NULL);
 #endif
 
-#ifndef __linux__
+#if !defined(__linux__) && !defined(_BSDONLY_SOURCE)
     if (lc == NULL) {
         return 0;
     }
@@ -389,6 +389,10 @@ GetJavaProperties(JNIEnv *env)
 
     /* patches/service packs installed */
     sprops.patch_level = NULL;      // leave it undefined
+
+#ifdef __OpenBSD__
+    sprops.java_net_preferIPv4Stack = "true";
+#endif
 
 #ifdef SI_ISALIST
     /* supported instruction sets */

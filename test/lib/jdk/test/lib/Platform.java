@@ -130,6 +130,14 @@ public class Platform {
         return isOs("win");
     }
 
+    public static boolean isBSD() {
+        return osName.toLowerCase().endsWith("bsd");
+    }
+
+    public static boolean isOpenBSD() {
+        return osName.toLowerCase().equals("openbsd");
+    }
+
     private static boolean isOs(String osname) {
         return osName.toLowerCase(ROOT).startsWith(osname.toLowerCase(ROOT));
     }
@@ -248,6 +256,8 @@ public class Platform {
             return false; // SA is not enabled.
         }
         if (isAix()) {
+            return false; // SA not implemented.
+        } else if (isOpenBSD()) {
             return false; // SA not implemented.
         } else if (isLinux()) {
             if (isS390x() || isARM()) {
@@ -458,7 +468,8 @@ public class Platform {
                 isServer() &&
                 (isLinux()   ||
                  isOSX()     ||
-                 isWindows()) &&
+                 isWindows() ||
+                 isBSD()) &&
                 !isZero()    &&
                 !isMinimal() &&
                 !isARM());
@@ -468,7 +479,7 @@ public class Platform {
      * This should match the #if condition in ClassListParser::load_class_from_source().
      */
     public static boolean areCustomLoadersSupportedForCDS() {
-        return (is64bit() && (isLinux() || isOSX() || isWindows()));
+        return (is64bit() && (isLinux() || isOSX() || isWindows() || isBSD()));
     }
 
     /**

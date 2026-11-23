@@ -57,6 +57,10 @@
 #include <stdlib.h>
 #include <unistd.h>
 
+#ifdef __FreeBSD__
+#include <vm/vm_param.h>
+#endif
+
 #if defined(_AIX)
 #include <libperfstat.h>
 #endif
@@ -103,6 +107,25 @@ static jlong get_total_or_available_swap_space_size(JNIEnv* env, jboolean availa
         throw_internal_error(env, "perfstat_memory_total failed");
     }
     return available ? (jlong)(memory_info.pgsp_free * 4L * 1024L) : (jlong)(memory_info.pgsp_total * 4L * 1024L);
+#elif defined(__FreeBSD__)
+    struct xswdev xsw;
+    size_t mibsize, size;
+    jlong npages;
+    int mib[16], n;
+
+    mibsize = sizeof(mib) / sizeof(mib[0]);
+    if (sysctlnametomib("vm.swap_info", mib, &mibsize) == -1)
+       return (0);
+    for (n = 0, npages = 0; ; n++) {
+       mib[mibsize] = n;
+       size = sizeof(xsw);
+       if (sysctl(mib, mibsize + 1, &xsw, &size, NULL, 0) == -1)
+           break;
+       npages += xsw.xsw_nblks;
+       if (available)
+           npages -= xsw.xsw_used;
+    }
+    return (npages * page_size);
 #else /* _ALLBSD_SOURCE */
     /*
      * XXXBSD: there's no way available to get swap info in
@@ -121,7 +144,7 @@ Java_com_sun_management_internal_OperatingSystemImpl_initialize0
 }
 
 // Linux-specific implementation is in UnixOperatingSystem.c
-#if !defined(__linux__)
+#if !defined(__linux__) && !defined(_BSDONLY_SOURCE)
 JNIEXPORT jlong JNICALL
 Java_com_sun_management_internal_OperatingSystemImpl_getCommittedVirtualMemorySize0
   (JNIEnv *env, jobject mbean)
@@ -217,6 +240,22 @@ Java_com_sun_management_internal_OperatingSystemImpl_getFreeMemorySize0
         return -1;
     }
     return (jlong)vm_stats.free_count * page_size;
+#elif defined(__FreeBSD__)
+    static const char *vm_stats[] = {
+       "vm.stats.vm.v_free_count",
+       "vm.stats.vm.v_cache_count",
+       /* "vm.stats.vm.v_inactive_count", */
+       NULL
+    };
+    size_t size;
+    jlong free_pages;
+    u_int i, npages;
+    for (i = 0, free_pages = 0, size = sizeof(npages); vm_stats[i] != NULL; i++) {
+       if (sysctlbyname(vm_stats[i], &npages, &size, NULL, 0) == -1)
+           return 0;
+       free_pages += npages;
+    }
+    return (free_pages * page_size);
 #elif defined(_ALLBSD_SOURCE)
     /*
      * XXBSDL no way to do it in FreeBSD
@@ -240,12 +279,24 @@ Java_com_sun_management_internal_OperatingSystemImpl_getTotalMemorySize0
   (JNIEnv *env, jobject mbean)
 {
 #ifdef _ALLBSD_SOURCE
-    jlong result = 0;
     int mib[2];
     size_t rlen;
+#if defined (HW_MEMSIZE) // Apple
+    uint64_t result = 0;
+    #define MEMMIB HW_MEMSIZE;
+#elif defined(HW_PHYSMEM64) // OpenBSD & NetBSD
+    int64_t result = 0;
+    #define MEMMIB HW_PHYSMEM64;
+#elif defined(HW_PHYSMEM) // FreeBSD
+    unsigned long result = 0;
+    #define MEMMIB HW_PHYSMEM;
+#else
+    #error No ways to get physmem
+#endif
 
     mib[0] = CTL_HW;
-    mib[1] = HW_MEMSIZE;
+    mib[1] = MEMMIB;
+
     rlen = sizeof(result);
     if (sysctl(mib, 2, &result, &rlen, NULL, 0) != 0) {
         throw_internal_error(env, "sysctl failed");
@@ -266,6 +317,7 @@ Java_com_sun_management_internal_OperatingSystemImpl_getTotalMemorySize0
 
 
 
+#ifndef _BSDONLY_SOURCE
 JNIEXPORT jlong JNICALL
 Java_com_sun_management_internal_OperatingSystemImpl_getOpenFileDescriptorCount0
   (JNIEnv *env, jobject mbean)
@@ -314,12 +366,6 @@ Java_com_sun_management_internal_OperatingSystemImpl_getOpenFileDescriptorCount0
     free(fds);
 
     return nfiles;
-#elif defined(_ALLBSD_SOURCE)
-    /*
-     * XXXBSD: there's no way available to do it in FreeBSD, AFAIK.
-     */
-    // throw_internal_error(env, "Unimplemented in FreeBSD");
-    return (100);
 #else /* solaris/linux */
     DIR *dirp;
     struct dirent* dentp;
@@ -353,6 +399,7 @@ Java_com_sun_management_internal_OperatingSystemImpl_getOpenFileDescriptorCount0
     return (fds - 1);
 #endif
 }
+#endif
 
 JNIEXPORT jlong JNICALL
 Java_com_sun_management_internal_OperatingSystemImpl_getMaxFileDescriptorCount0

@@ -36,6 +36,8 @@ class os::Bsd {
   // mach_absolute_time
   static mach_timebase_info_data_t _timebase_info;
   static volatile uint64_t         _max_abstime;
+#else
+  static int (*_getcpuclockid)(pthread_t, clockid_t *);
 #endif
 
   static GrowableArray<int>* _cpu_to_node;
@@ -70,8 +72,6 @@ class os::Bsd {
   // Real-time clock functions
   static void clock_init(void);
 
-  static void *dlopen_helper(const char *path, int mode, char *ebuf, int ebuflen);
-
   // Stack repair handling
 
   // none present
@@ -99,6 +99,9 @@ class os::Bsd {
   static void set_numa_tonode_memory(numa_tonode_memory_func_t func) { _numa_tonode_memory = func; }
   static void set_numa_interleave_memory(numa_interleave_memory_func_t func) { _numa_interleave_memory = func; }
   static void set_numa_all_nodes(unsigned long* ptr) { _numa_all_nodes = ptr; }
+
+  static void *dlopen_helper(const char *path, char *ebuf, int ebuflen);
+
  public:
   static int sched_getcpu()  { return _sched_getcpu != nullptr ? _sched_getcpu() : -1; }
   static int numa_node_to_cpus(int node, unsigned long *buffer, int bufferlen) {
