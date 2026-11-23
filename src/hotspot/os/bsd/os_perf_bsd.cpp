@@ -34,6 +34,10 @@
   #include <mach/task_info.h>
 #else
 # if !defined(__NetBSD__)
+  #if ( defined(__aarch64__) && __FreeBSD_version >= 160000 )
+    // do not redefine "breakpoint"
+    #define _MACHINE_CPUFUNC_H_
+  #endif
   #include <sys/user.h>
 # endif
   #include <sys/sched.h>
