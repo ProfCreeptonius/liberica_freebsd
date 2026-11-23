@@ -1,3 +1,23 @@
+# What is this repo?
+
+This repo contains the source of [LibericaJDK](https://bell-sw.com/libericajdk/) by Bellsoft, with patches to enable building on FreeBSD.
+
+Prerequisites:
+
+The following packages are required for building:
+
+```sh
+pkg install bash gmake autoconf gsed zip git cups alsa-lib fontconfig freetype2 giflib harfbuzz lcms2 png jpeg-turbo libX11 libXext libXi libXrandr libXrender libXt libXtst xorg-fonts-truetype openjdk25
+```
+
+Procfs must be mounted on `/proc` (`mount -t procfs proc /proc`). See `man procfs` for more information.
+
+Build is tested on FreeBSD 15.1-RELEASE amd64
+
+
+# Original readme:
+
+
 # Welcome to OpenJDK 25 Updates!
 
 The JDK 25 Updates project uses two GitHub repositories.
