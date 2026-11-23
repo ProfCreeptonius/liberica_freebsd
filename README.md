@@ -15,6 +15,21 @@ Procfs must be mounted on `/proc` (`mount -t procfs proc /proc`). See `man procf
 Build is tested on FreeBSD 15.1-RELEASE amd64
 
 
+# Build guide:
+
+Configure:
+
+```sh 
+sh ./configure_command.sh
+```
+
+Build:
+
+```sh
+sh ./build_command.sh
+```
+
+
 # Original readme:
 
 
